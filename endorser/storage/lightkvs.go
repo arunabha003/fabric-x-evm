@@ -205,9 +205,12 @@ func (r *Reader) Close() error {
 }
 
 // applyUpdates computes new snapshot data by applying updates on top of
-// oldData, assigning each write the existing version + 1 (or 0 for a new
-// key). Shared by LightKVS.applyBlock and RevertibleLightKVS.applyBlock,
-// which only differ in how they track the eviction floor when wrapping.
+// oldData. Mirrors PebbleKVS.commitBlock's version scheme: a delete is stored
+// as a tombstone rather than removing the key, and each write's version is
+// MAX(version)+1 for its key, so multiple writes to one key within a batch
+// get consecutive versions and the counter never resets across a tombstone.
+// Shared by LightKVS.applyBlock and RevertibleLightKVS.applyBlock, which only
+// differ in how they track the eviction floor when wrapping.
 func applyUpdates(oldData map[string]*ValueVersion, updates []KeyValueVersion) map[string]*ValueVersion {
 	// Nothing to apply: share the old map. Snapshots are immutable and every
 	// mutation path clones first.
@@ -218,28 +221,31 @@ func applyUpdates(oldData map[string]*ValueVersion, updates []KeyValueVersion) m
 		newData = maps.Clone(oldData)
 	}
 
-	// Update changed entries with new ValueVersion structs
-	// Only these allocations are new; unchanged entries share pointers
-	for _, update := range updates {
-		if update.IsDelete {
-			// Delete: remove the key from the map
-			delete(newData, update.Key)
-		} else {
-			// Compute next version for this key: existing version + 1, or 0 if new
-			nextVersion := uint64(0)
-			if existing, ok := oldData[update.Key]; ok {
-				nextVersion = existing.Version + 1
-			}
+	// nextVersion holds the version to assign to the *next* write of each key
+	// within this batch, so a key written more than once in one block still
+	// gets consecutive versions instead of all being versioned off oldData.
+	nextVersion := make(map[string]uint64, len(updates))
 
-			// Update: set new value (Value can be nil, which is a valid stored value)
-			newData[update.Key] = &ValueVersion{
-				Value:    update.Value,
-				BlockNum: update.BlockNum,
-				TxNum:    update.TxNum,
-				Version:  nextVersion,
-				TxID:     update.TxID,
-				IsDelete: false,
+	for _, update := range updates {
+		version, seen := nextVersion[update.Key]
+		if !seen {
+			version = 0
+			if existing, ok := oldData[update.Key]; ok {
+				version = existing.Version + 1
 			}
+		}
+		nextVersion[update.Key] = version + 1
+
+		// Value can be nil, which is a valid stored value; a delete is kept as
+		// a tombstone record rather than removed so the version counter
+		// survives it.
+		newData[update.Key] = &ValueVersion{
+			Value:    update.Value,
+			BlockNum: update.BlockNum,
+			TxNum:    update.TxNum,
+			Version:  version,
+			TxID:     update.TxID,
+			IsDelete: update.IsDelete,
 		}
 	}
 
@@ -345,13 +351,10 @@ func verifyReplay(current *Snapshot, updates []KeyValueVersion) error {
 	}
 	for key, u := range final {
 		existing, ok := current.Data[key]
-		if u.IsDelete {
-			if ok {
-				return fmt.Errorf("conflicting write for %q at block=%d: existing value present, replayed is a delete", key, u.BlockNum)
-			}
-			continue
+		if !ok || existing.IsDelete != u.IsDelete || existing.TxID != u.TxID {
+			return fmt.Errorf("conflicting write for %q at block=%d: replayed content differs from existing", key, u.BlockNum)
 		}
-		if !ok || !bytes.Equal(existing.Value, u.Value) || existing.TxID != u.TxID {
+		if !u.IsDelete && !bytes.Equal(existing.Value, u.Value) {
 			return fmt.Errorf("conflicting write for %q at block=%d: replayed content differs from existing", key, u.BlockNum)
 		}
 	}
