@@ -205,12 +205,9 @@ func (r *Reader) Close() error {
 }
 
 // applyUpdates computes new snapshot data by applying updates on top of
-// oldData. Mirrors PebbleKVS.commitBlock's version scheme: a delete is stored
-// as a tombstone rather than removing the key, and each write's version is
-// MAX(version)+1 for its key, so multiple writes to one key within a batch
-// get consecutive versions and the counter never resets across a tombstone.
-// Shared by LightKVS.applyBlock and RevertibleLightKVS.applyBlock, which only
-// differ in how they track the eviction floor when wrapping.
+// oldData. Each write takes the key's previous version + 1, so repeated writes
+// to one key within a batch get consecutive versions. A delete is stored as a
+// tombstone, keeping the counter intact across it.
 func applyUpdates(oldData map[string]*ValueVersion, updates []KeyValueVersion) map[string]*ValueVersion {
 	// Nothing to apply: share the old map. Snapshots are immutable and every
 	// mutation path clones first.

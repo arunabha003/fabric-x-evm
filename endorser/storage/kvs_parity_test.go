@@ -32,9 +32,6 @@ type kvsBackend struct {
 	open func(t *testing.T, loc string, historySize int) KVS
 	// persistent reports whether state survives close and reopen.
 	persistent bool
-	// mvccVersions reports per-key MAX(version)+1 numbering, mirroring the
-	// committer's worldstate. See TestParityVersionSemantics.
-	mvccVersions bool
 }
 
 func kvsBackends() []kvsBackend {
@@ -45,8 +42,7 @@ func kvsBackends() []kvsBackend {
 			open: func(t *testing.T, _ string, historySize int) KVS {
 				return NewLightKVS(historySize)
 			},
-			persistent:   false,
-			mvccVersions: true,
+			persistent: false,
 		},
 		{
 			name:   "RevertibleLightKVS",
@@ -54,8 +50,7 @@ func kvsBackends() []kvsBackend {
 			open: func(t *testing.T, _ string, historySize int) KVS {
 				return NewRevertibleLightKVS(NewLightKVS(historySize))
 			},
-			persistent:   false,
-			mvccVersions: true,
+			persistent: false,
 		},
 		{
 			name:   "PebbleKVS",
@@ -67,8 +62,7 @@ func kvsBackends() []kvsBackend {
 				}
 				return kvs
 			},
-			persistent:   true,
-			mvccVersions: true,
+			persistent: true,
 		},
 		{
 			name:   "VersionedDB",
@@ -80,8 +74,7 @@ func kvsBackends() []kvsBackend {
 				}
 				return NewVersionedDBWrapper(db)
 			},
-			persistent:   true,
-			mvccVersions: true,
+			persistent: true,
 		},
 	}
 }
@@ -596,9 +589,8 @@ func TestParityReplayAcrossReopen(t *testing.T) {
 
 // TestParityVersionSemantics pins the per-key version scheme every backend
 // must agree on: MAX(version)+1, consecutive across multiple writes to a key
-// within a block, and never resetting across a tombstone. This is what the
-// fabric-x MVCC read-set is validated against, since VersionedDB is the
-// committer's own worldstate schema.
+// within a block, and never resetting across a tombstone. The MVCC read-set
+// carries these versions, so drift here surfaces later as rejected transactions.
 func TestParityVersionSemantics(t *testing.T) {
 	t.Run("multiple writes to one key in a block", func(t *testing.T) {
 		forEachBackend(t, func(t *testing.T, b kvsBackend) {
@@ -611,10 +603,7 @@ func TestParityVersionSemantics(t *testing.T) {
 			wantValue(t, rec, "from-tx1")
 
 			// tx0→0, tx1→1: consecutive within the block.
-			want := uint64(0)
-			if b.mvccVersions {
-				want = 1
-			}
+			want := uint64(1)
 			if rec.Version != want {
 				t.Errorf("expected version %d, got %d", want, rec.Version)
 			}
@@ -636,10 +625,7 @@ func TestParityVersionSemantics(t *testing.T) {
 			wantValue(t, rec, "again")
 
 			// Counting continues across the tombstone: v0=0, tombstone=1, rewrite=2.
-			want := uint64(0)
-			if b.mvccVersions {
-				want = 2
-			}
+			want := uint64(2)
 			if rec.Version != want {
 				t.Errorf("expected version %d, got %d", want, rec.Version)
 			}
@@ -665,10 +651,7 @@ func TestParityVersionSemantics(t *testing.T) {
 
 			// Every write including tombstones is versioned: two full cycles
 			// land at 4 (v0=0, del=1, v1=2, del=3, v2=4).
-			want := uint64(0)
-			if b.mvccVersions {
-				want = 4
-			}
+			want := uint64(4)
 			if rec.Version != want {
 				t.Errorf("expected version %d after two tombstone cycles, got %d", want, rec.Version)
 			}
@@ -726,10 +709,7 @@ func TestParityDeleteNeverWrittenKey(t *testing.T) {
 		rec := mustGet(t, kvs, "ns1", "ghost")
 		wantValue(t, rec, "alive")
 
-		want := uint64(0)
-		if b.mvccVersions {
-			want = 1 // the delete-of-nothing already consumed version 0
-		}
+		want := uint64(1) // the delete-of-nothing already consumed version 0
 		if rec.Version != want {
 			t.Errorf("expected version %d for first real write after delete-of-nothing, got %d", want, rec.Version)
 		}
