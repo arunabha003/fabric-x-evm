@@ -348,11 +348,23 @@ func verifyReplay(current *Snapshot, updates []KeyValueVersion) error {
 	}
 	for key, u := range final {
 		existing, ok := current.Data[key]
-		if !ok || existing.IsDelete != u.IsDelete || existing.TxID != u.TxID {
-			return fmt.Errorf("conflicting write for %q at block=%d: replayed content differs from existing", key, u.BlockNum)
+		if !ok {
+			if u.IsDelete {
+				return fmt.Errorf("conflicting write for %q at block=%d: nothing stored for this key, replayed is a delete", key, u.BlockNum)
+			}
+			return fmt.Errorf("conflicting write for %q at block=%d: nothing stored for this key, replayed is a value write", key, u.BlockNum)
+		}
+		if existing.IsDelete != u.IsDelete {
+			if u.IsDelete {
+				return fmt.Errorf("conflicting write for %q at block=%d: existing value present, replayed is a delete", key, u.BlockNum)
+			}
+			return fmt.Errorf("conflicting write for %q at block=%d: existing is a delete, replayed is a value write", key, u.BlockNum)
+		}
+		if existing.TxID != u.TxID {
+			return fmt.Errorf("conflicting write for %q at block=%d: stored by tx %q, replayed by tx %q", key, u.BlockNum, existing.TxID, u.TxID)
 		}
 		if !u.IsDelete && !bytes.Equal(existing.Value, u.Value) {
-			return fmt.Errorf("conflicting write for %q at block=%d: replayed content differs from existing", key, u.BlockNum)
+			return fmt.Errorf("conflicting write for %q at block=%d: stored value (%d bytes) differs from replayed (%d bytes), both from tx %q", key, u.BlockNum, len(existing.Value), len(u.Value), u.TxID)
 		}
 	}
 	return nil
